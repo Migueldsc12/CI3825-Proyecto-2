@@ -29,6 +29,9 @@ typedef struct {
     int N, M;
 } ThreadData;
 
+// Mutex para proteger el acceso a la cuadrícula
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
 // Funcion que retorna el maximo de 2 numeros
 static inline int max_int(int a, int b)
 {
@@ -54,7 +57,6 @@ void read_grid_size(FILE *f, int *N, int *M)
 // Funcion que inicializa la cuadricula
 Cell *initialize_grid(int N, int M) 
 {
-
     // Crear la cuadrícula (matriz de Cell) en el heap.
     int total_cells = N * M;
     Cell *grid = malloc(total_cells * sizeof(Cell));
@@ -167,18 +169,24 @@ void *thread_worker(void *arg)
             for (int y = y_start; y <= y_end; y++) 
             {
                 int idx = x * td->M + y;
+               
+                // Bloquear el mutex antes de actualizar la resistencia
+                pthread_mutex_lock(&mutex);
+               
                 // Actualizar únicamente si hay un objeto OM o IC.
                 if (td->grid[idx].type == OM) 
                 {
                     // Para OM se suma PE; dado que la resistencia es negativa,
                     // si llega a 0 o se vuelve positiva, el objeto se considera destruido.
-                    __sync_fetch_and_add(&td->grid[idx].resistance, PE);
+                    td->grid[idx].resistance += PE;
                 } 
                 else if (td->grid[idx].type == IC) 
                 {
                     // Para IC se resta PE.
-                    __sync_fetch_and_add(&td->grid[idx].resistance, -PE);
+                    td->grid[idx].resistance -= PE;
                 }
+                // Desbloquear el mutex después de actualizar la resistencia
+                pthread_mutex_unlock(&mutex);
             }
         }
     }
@@ -268,7 +276,7 @@ int main(int argc, char *argv[])
     Drone *drones = read_drones(f, &L);
     fclose(f);
 
-    //Ajustar n: n debe ser <= min(N*M, L)
+    // Ajustar n: n debe ser <= min(N*M, L)
     int nm = N * M;
     int limit = (nm < L) ? nm : L;
     if (n > limit)
@@ -290,7 +298,7 @@ int main(int argc, char *argv[])
         start += count;
     }
 
-     // Esperar a que terminen todos los hilos.
+    // Esperar a que terminen todos los hilos.
     for (int i = 0; i < n; i++)
     {
           pthread_join(threads[i], NULL);
@@ -308,6 +316,9 @@ int main(int argc, char *argv[])
     // Liberar recursos.
     free(drones);
     free(grid);
+
+    // Destruir el mutex
+    pthread_mutex_destroy(&mutex);
 
     return EXIT_SUCCESS;
 }
