@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <pthread.h>
 
 // Definición de tipos de objetos:
 #define TB 0 // Tierra Baldía
@@ -47,9 +48,8 @@ void read_grid_size(FILE *f, int *N, int *M)
     }
 }
 
-
 // Funcion para inicializar la grilla
-Cell *initialize_grid(int N, int M) 
+Cell *initialize_grid(int N, int M, pthread_mutex_t **mutex) 
 {
     size_t grid_size = N * M * sizeof(Cell);
     Cell *grid = mmap(NULL, grid_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -58,6 +58,23 @@ Cell *initialize_grid(int N, int M)
         perror("Error al crear memoria compartida para la cuadrícula");
         exit(EXIT_FAILURE);
     }
+
+    // Crear un mutex en memoria compartida
+    *mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (*mutex == MAP_FAILED) 
+    {
+        perror("Error al crear memoria compartida para el mutex");
+        munmap(grid, grid_size);
+        exit(EXIT_FAILURE);
+    }
+
+    // Inicializar el mutex
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(*mutex, &attr);
+
+    // Inicializar la cuadrícula
     for (int i = 0; i < N * M; i++) 
     {
         grid[i].type = TB;
@@ -130,7 +147,7 @@ Drone *read_drones(FILE *f, int *L)
 }
 
 // Funcion para procesar los drones
-void process_drones(int start, int end, Drone *drones, Cell *grid, int N, int M) 
+void process_drones(int start, int end, Drone *drones, Cell *grid, int N, int M, pthread_mutex_t *mutex) 
 {
     for (int j = start; j < end; j++) 
     {
@@ -148,15 +165,19 @@ void process_drones(int start, int end, Drone *drones, Cell *grid, int N, int M)
             for (int y = y_start; y <= y_end; y++) 
             {
                 int idx = x * M + y;
-                 // Solo se actualiza si hay un objeto OM o IC.
+                // Bloquear el mutex antes de actualizar la resistencia
+                pthread_mutex_lock(mutex);
+                // Solo se actualiza si hay un objeto OM o IC.
                 if (grid[idx].type == OM) 
                 {
-                    __sync_fetch_and_add(&grid[idx].resistance, PE);
+                    grid[idx].resistance += PE;
                 } 
                 else if (grid[idx].type == IC) 
                 {
-                    __sync_fetch_and_add(&grid[idx].resistance, -PE);
+                    grid[idx].resistance -= PE;
                 }
+                // Desbloquear el mutex después de actualizar la resistencia
+                pthread_mutex_unlock(mutex);
             }
         }
     }
@@ -227,7 +248,11 @@ int main(int argc, char *argv[]) {
     
     int N, M, K, L;
     read_grid_size(f, &N, &M);
-    Cell *grid = initialize_grid(N, M);
+
+    // Inicializar la cuadrícula y el mutex en memoria compartida
+    pthread_mutex_t *mutex;
+    Cell *grid = initialize_grid(N, M, &mutex);
+
     read_objects(f, grid, N, M, &K);
     Drone *drones = read_drones(f, &L);
     fclose(f);
@@ -248,7 +273,6 @@ int main(int argc, char *argv[]) {
     int chunk = L / n, rem = L % n, start = 0;
     for (int i = 0; i < n; i++) 
     {
-        
         int count = chunk + (i < rem ? 1 : 0);
         pid_t pid = fork();
         
@@ -259,7 +283,7 @@ int main(int argc, char *argv[]) {
         } 
         else if (pid == 0) 
         {
-            process_drones(start, start + count, drones, grid, N, M);
+            process_drones(start, start + count, drones, grid, N, M, mutex);
             exit(EXIT_SUCCESS);
         }
         start += count;
@@ -272,6 +296,7 @@ int main(int argc, char *argv[]) {
     
     // Liberar memoria.
     munmap(grid, N * M * sizeof(Cell));
+    munmap(mutex, sizeof(pthread_mutex_t));
     free(drones);
     return EXIT_SUCCESS;
 }
